@@ -23,17 +23,50 @@ from collections import namedtuple
 
 import numpy as np
 
+GAIN = 6
+
+
+def createCommand():
+    """Internal function to create start command."""
+    # Byte 0: ADS sampling rate
+    # - 6 -> 500sps
+    # Byte 1: ADS1298 mode
+    # - 0 -> default
+    # Byte 2: depends on the number of ADSs
+    # Byte 3: chip select (not modifiable)
+    command = [6, 0, 2, 4]
+    # Byte 4: PGA gain
+    # 16 ->  1
+    # 32 ->  2
+    # 64 ->  4
+    #  0 ->  6
+    # 80 ->  8
+    # 96 -> 12
+    gainCmdMap = {
+        1: 16,
+        2: 32,
+        4: 64,
+        6: 0,
+        8: 80,
+        12: 96,
+    }
+    command.append(gainCmdMap[GAIN])
+    # Byte 5: CR (not modifiable)
+    command.append(13)
+    # Byte 6: LF (not modifiable)
+    command.append(10)
+
+    return command
+
+
 packetSize: int = 234
 """Number of bytes in each package."""
 
 startSeq: list[bytes] = [
-    # bytes([20, 1, 50]),
     (18).to_bytes(),  # send byte 18 to start
-    0.2,
-    # bytes([6, 0, 1, 4, 0, 13, 10]),                # sample_rate, ADS_MODE (0), [2], [4], PGA_GAIN
-    bytes([6, 0, 2, 4, 0]),
+    0.2,  # wait 200 ms
+    bytes(createCommand()),
 ]
-
 """Sequence of commands to start the board."""
 
 stopSeq: list[bytes] = [(19).to_bytes()]
