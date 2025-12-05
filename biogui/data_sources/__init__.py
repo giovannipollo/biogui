@@ -19,6 +19,8 @@ limitations under the License.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtWidgets import QWidget
 
 from .base import DataSourceConfigWidget, DataSourceType, DataSourceWorker
@@ -60,7 +62,7 @@ def getConfigWidget(
 
 def getDataSourceWorker(
     dataSourceType: DataSourceType,
-    packetSize: int,
+    packetSize: int | Callable[[bytes], tuple[int, int] | None],
     startSeq: list[bytes],
     stopSeq: list[bytes],
     **kwargs,
@@ -72,8 +74,9 @@ def getDataSourceWorker(
     ----------
     dataSourceType : DataSourceType
         Type of the data source.
-    packetSize : int
-        Number of bytes in the packet.
+    packetSize : int or callable
+        Number of bytes in the packet, or a callable that takes a bytes
+        buffer and returns (packet_size, offset) tuple or None.
     startSeq : list of bytes
         Sequence of commands to start the source.
     stopSeq : list of bytes

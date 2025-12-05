@@ -20,6 +20,7 @@ limitations under the License.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from PySide6.QtCore import QByteArray, QThread
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -106,8 +107,9 @@ class UnixSocketDataSourceWorker(DataSourceWorker):
 
     Parameters
     ----------
-    packetSize : int
-        Number of bytes in the packet.
+    packetSize : int or callable
+        Number of bytes in the packet, or a callable that takes a bytes
+        buffer and returns (packet_size, offset) tuple.
     startSeq : list of bytes or float
         Sequence of commands to start the source.
     stopSeq : list of bytes or float
@@ -117,8 +119,8 @@ class UnixSocketDataSourceWorker(DataSourceWorker):
 
     Attributes
     ----------
-    _packetSize : int
-        Size of each packet read from the Unix socket.
+    _packetSize : int or callable
+        Size of each packet read from the Unix socket, or a callable.
     _startSeq : list of bytes or float
         Sequence of commands to start the source.
     _stopSeq : list of bytes or float
@@ -142,7 +144,7 @@ class UnixSocketDataSourceWorker(DataSourceWorker):
 
     def __init__(
         self,
-        packetSize: int,
+        packetSize: int | Callable[[bytes], tuple[int, int] | None],
         startSeq: list[bytes | float],
         stopSeq: list[bytes | float],
         socketPath: str,
@@ -228,7 +230,27 @@ class UnixSocketDataSourceWorker(DataSourceWorker):
         self._buffer.append(self._clientSock.readAll())
 
         # Emit all data packets in the buffer
-        while self._buffer.size() >= self._packetSize:
-            data = self._buffer.left(self._packetSize).data()
+        while True:
+            bufferData = bytes(self._buffer.data())
+
+            # Get packet size - either fixed int or from callable
+            if callable(self._packetSize):
+                result = self._packetSize(bufferData)
+                if result is None:
+                    # Not enough data or no valid packet found
+                    break
+                packetSize, offset = result
+                if offset > 0:
+                    # Skip garbage bytes before the valid packet
+                    self._buffer.remove(0, offset)
+                    continue
+            else:
+                packetSize = self._packetSize
+                offset = 0
+
+            if self._buffer.size() < packetSize:
+                break
+
+            data = self._buffer.left(packetSize).data()
             self.dataPacketReady.emit(data)
-            self._buffer.remove(0, self._packetSize)
+            self._buffer.remove(0, packetSize)

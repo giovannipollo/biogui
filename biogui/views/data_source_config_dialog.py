@@ -86,8 +86,13 @@ def _loadInterfaceFromFile(filePath: str) -> tuple[InterfaceModule | None, str]:
             None,
             'The selected Python module does not contain a "decodeFn" function.',
         )
-    if not isinstance(module.packetSize, int) or module.packetSize <= 0:
-        return None, "The packet size must be a positive integer."
+    # packetSize can be either a positive integer or a callable
+    if callable(module.packetSize):
+        pass  # Valid: dynamic packet size function
+    elif isinstance(module.packetSize, int) and module.packetSize > 0:
+        pass  # Valid: fixed positive integer
+    else:
+        return None, "The packet size must be a positive integer or a callable."
 
     for sigName in module.sigInfo.keys():
         if sigName in ("acq_ts", "trigger"):

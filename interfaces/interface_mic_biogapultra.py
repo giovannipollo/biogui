@@ -31,15 +31,19 @@ import numpy as np
 
 # ============== Microphone Configuration ==============
 MIC_SAMPLE_RATE = 16000  # Hz
-MIC_SAMPLES_PER_PACKET = 115  # 16-bit samples per BLE packet
+MIC_SAMPLES_PER_PACKET = 64  # 16-bit samples per BLE packet
 MIC_HEADER = 0xAA
 MIC_TRAILER = 0x55
+MIC_PACKET_SIZE = 131  # 1 header + 1 counter + 64*2 audio + 1 trailer
 
 # ============== sEMG Configuration ==============
 EMG_SAMPLE_RATE = 500  # Hz
 EMG_N_CHANNELS = 16
 EMG_N_SAMPLES_PER_PACKET = 4
 EMG_GAIN = 6
+EMG_HEADER = 0x55
+EMG_TRAILER = 0xAA
+EMG_PACKET_SIZE = 234
 
 
 def createCommand():
@@ -53,8 +57,52 @@ def createCommand():
 
 
 # ============  == Interface Definition ==============
-packetSize: int = 234
-"""Number of bytes in each package."""
+def _packetSizeFn(buffer: bytes) -> tuple[int, int] | None:
+    """
+    Determine packet size and offset from buffer.
+
+    This function scans the buffer to find valid packet boundaries.
+    It returns a tuple of (packet_size, offset) where:
+    - packet_size: the size of the valid packet found
+    - offset: number of garbage bytes to skip before the valid packet
+
+    Parameters
+    ----------
+    buffer : bytes
+        The current data buffer.
+
+    Returns
+    -------
+    tuple[int, int] or None
+        (packet_size, offset) if a valid packet is found, None otherwise.
+    """
+    if len(buffer) < 2:
+        return None
+
+    # Scan for valid packet start
+    for i in range(len(buffer)):
+        if i + MIC_PACKET_SIZE <= len(buffer):
+            # Check for MIC packet: header=0xAA, trailer=0x55
+            if buffer[i] == MIC_HEADER and buffer[i + MIC_PACKET_SIZE - 1] == MIC_TRAILER:
+                return (MIC_PACKET_SIZE, i)
+
+        if i + EMG_PACKET_SIZE <= len(buffer):
+            # Check for EMG packet: header=0x55, trailer=0xAA
+            if buffer[i] == EMG_HEADER and buffer[i + EMG_PACKET_SIZE - 1] == EMG_TRAILER:
+                return (EMG_PACKET_SIZE, i)
+
+        # If we've checked this position and neither packet type matches,
+        # and we don't have enough data for either packet type, stop scanning
+        if i + MIC_PACKET_SIZE > len(buffer) and i + EMG_PACKET_SIZE > len(buffer):
+            break
+
+    # Not enough data or no valid packet found
+    return None
+
+
+# Export the function as packetSize - the system will detect it's callable
+packetSize = _packetSizeFn
+"""Callable that determines packet size dynamically based on buffer contents."""
 
 startSeq: list[bytes | float] = [
     (18).to_bytes(),  # Start sEMG streaming
@@ -134,14 +182,14 @@ def decodeFn(data: bytes) -> dict[str, np.ndarray]:
     """
     Function to decode binary data received from BioGAP.
 
-    Distinguishes between microphone and sEMG packets based on the header byte.
-    Returns the decoded signal immediately, with an empty array for the other
-    signal type.
+    Distinguishes between microphone and sEMG packets based on the header byte
+    and packet size. Returns the decoded signal immediately, with an empty array
+    for the other signal type.
 
     Parameters
     ----------
     data : bytes
-        A packet of 234 bytes.
+        A packet of either 131 bytes (MIC) or 234 bytes (EMG).
 
     Returns
     -------
@@ -150,12 +198,10 @@ def decodeFn(data: bytes) -> dict[str, np.ndarray]:
         - For mic packets: {"biogap": empty, "mic": audio_data}
         - For sEMG packets: {"biogap": emg_data, "mic": empty}
     """
-    if len(data) != packetSize:
-        raise ValueError(f"Invalid packet size: {len(data)}, expected {packetSize}")
-
+    packet_len = len(data)
     header = data[0]
 
-    if header == MIC_HEADER:
+    if packet_len == MIC_PACKET_SIZE and header == MIC_HEADER:
         # This is a microphone packet
         trailer = data[-1]
         if trailer != MIC_TRAILER:
@@ -165,8 +211,17 @@ def decodeFn(data: bytes) -> dict[str, np.ndarray]:
         audio = _decode_mic(data)
         emg = np.zeros((0, EMG_N_CHANNELS), dtype=np.float32)
         return {"biogap": emg, "mic": audio}
-    else:
+    elif packet_len == EMG_PACKET_SIZE and header == EMG_HEADER:
         # This is an sEMG packet
+        trailer = data[-1]
+        if trailer != EMG_TRAILER:
+            raise ValueError(
+                f"Invalid EMG trailer: 0x{trailer:02X}, expected 0x{EMG_TRAILER:02X}"
+            )
         emg = _decode_emg(data)
         audio = np.zeros((0, 1), dtype=np.float32)
         return {"biogap": emg, "mic": audio}
+    else:
+        raise ValueError(
+            f"Invalid packet: size={packet_len}, header=0x{header:02X}"
+        )
