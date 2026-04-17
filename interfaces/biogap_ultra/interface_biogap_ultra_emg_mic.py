@@ -37,7 +37,7 @@ EMG_PACKET_SIZE = 211
 
 MIC_HEADER = 0xAA
 MIC_TRAILER = 0x55
-MIC_PACKET_SIZE = 132
+MIC_PACKET_SIZE = 136
 
 
 packetSize = [(EMG_HEADER, EMG_PACKET_SIZE), (MIC_HEADER, MIC_PACKET_SIZE)]
@@ -68,6 +68,8 @@ sigInfo: dict = {
     "mic_emg": {"fs": SAMPLE_RATE_MIC, "nCh": 1},
     "counter_emg": {"fs": SAMPLE_RATE_EMG / SAMPLES_PER_PACKET_EMG, "nCh": 1},
     "counter_mic_emg": {"fs": SAMPLE_RATE_MIC / SAMPLES_PER_PACKET_MIC, "nCh": 1},
+    "timestamp_emg": {"fs": SAMPLE_RATE_EMG / SAMPLES_PER_PACKET_EMG, "nCh": 1},
+    "timestamp_mic_emg": {"fs": SAMPLE_RATE_MIC / SAMPLES_PER_PACKET_MIC, "nCh": 1},
 }
 """Dictionary containing the signals information."""
 
@@ -94,10 +96,13 @@ def _decode_emg(data: bytes) -> np.ndarray:
     nBit = 24
 
     counter = bytearray(data[1:3])
-
     # Cast the counter to np.int32
     counter = np.asarray(struct.unpack("<H", counter), dtype=np.int32)
     counter = counter.reshape(1, 1)
+
+    timestamp = bytearray(data[3:7])
+    timestamp = np.asarray(struct.unpack("<I", timestamp), dtype=np.int32)
+    timestamp = timestamp.reshape(1, 1)
     
     dataADSATmp = bytearray(
         data[7:31] + data[57:81] + data[107:131] + data[157:181]
@@ -125,12 +130,12 @@ def _decode_emg(data: bytes) -> np.ndarray:
     emg = emgAllChannels * (vRef / (gain * (2 ** (nBit - 1) - 1)))
     emg *= 10e6  # uV
     emg = emg.astype(np.float32)
-    return emg, counter
+    return emg, counter, timestamp
 
 
 def _decode_mic(data: bytes) -> np.ndarray:
     """Decode microphone packet.
-    Packet structure (132 bytes total):
+    Packet structure (136 bytes total):
     - 1 byte header (0xAA)
     - 2 byte counter
     - 64 samples of 16-bit signed audio data (128 bytes)
@@ -140,7 +145,11 @@ def _decode_mic(data: bytes) -> np.ndarray:
     counter = np.asarray(struct.unpack("<H", counter), dtype=np.int32)
     counter = counter.reshape(1, 1)
 
-    audio_data = data[3:3 + SAMPLES_PER_PACKET_MIC * 2] 
+    timestamp = bytearray(data[3:7])
+    timestamp = np.asarray(struct.unpack("<I", timestamp), dtype=np.int32)
+    timestamp = timestamp.reshape(1, 1)
+
+    audio_data = data[7:7 + SAMPLES_PER_PACKET_MIC * 2] 
 
     # Unpack 16-bit signed samples (little-endian)
     audio = np.array(
@@ -154,7 +163,7 @@ def _decode_mic(data: bytes) -> np.ndarray:
     # Convert to float32 normalized to [-1.0, 1.0] range
     audio = audio.astype(np.float32) / 32768.0
 
-    return audio, counter
+    return audio, counter, timestamp
 
 
 def decodeFn(data: bytes) -> dict[str, np.ndarray]:
@@ -184,14 +193,14 @@ def decodeFn(data: bytes) -> dict[str, np.ndarray]:
         trailer = data[-1]
         if trailer != MIC_TRAILER:
             raise ValueError(f"Invalid mic trailer: 0x{trailer:02X}, expected 0x{MIC_TRAILER:02X}")
-        audio, counter = _decode_mic(data)
-        return {"emg": None, "counter_emg": None, "mic_emg": audio, "counter_mic_emg": counter}
+        audio, counter, timestamp = _decode_mic(data)
+        return {"emg": None, "counter_emg": None, "mic_emg": audio, "counter_mic_emg": counter, "timestamp_emg": None, "timestamp_mic_emg": timestamp}
     elif packet_len == EMG_PACKET_SIZE and header == EMG_HEADER:
         # This is an EMG packet
         trailer = data[-1]
         if trailer != EMG_TRAILER:
             raise ValueError(f"Invalid EMG trailer: 0x{trailer:02X}, expected 0x{EMG_TRAILER:02X}")
-        emg, counter = _decode_emg(data)
-        return {"emg": emg, "counter_emg": counter, "mic_emg": None, "counter_mic_emg": None}
+        emg, counter, timestamp = _decode_emg(data)
+        return {"emg": emg, "counter_emg": counter, "mic_emg": None, "counter_mic_emg": None, "timestamp_emg": timestamp, "timestamp_mic_emg": None}
     else:
         raise ValueError(f"Invalid packet: size={packet_len}, header=0x{header:02X}")
