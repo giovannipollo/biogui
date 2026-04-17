@@ -216,6 +216,8 @@ class SerialDataSourceWorker(DataSourceWorker):
 
         # Reset serial port input buffer
         self._serialPort.clear(QSerialPort.Input)  # type: ignore
+        self._serialPort.setDataTerminalReady(True)
+        self._serialPort.setRequestToSend(True)
 
         # Start command
         for c in self._startSeq:
@@ -284,6 +286,7 @@ class SerialDataSourceWorker(DataSourceWorker):
             if self._buffer.size() >= packet_size:
                 data = self._buffer.left(packet_size).data()
                 self.dataPacketReady.emit(data)
+                #print("Data packet ready emitted!")
                 self._buffer.remove(0, packet_size)
             else:
                 break
