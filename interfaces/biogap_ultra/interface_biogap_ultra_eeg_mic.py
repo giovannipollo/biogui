@@ -33,11 +33,11 @@ SAMPLES_PER_PACKET_MIC = 64  # 16-bit samples per BLE packet
 # Packet format constants
 EEG_HEADER = 0x55
 EEG_TRAILER = 0xAA
-EEG_PACKET_SIZE = 210
+EEG_PACKET_SIZE = 211
 
 MIC_HEADER = 0xAA
 MIC_TRAILER = 0x55
-MIC_PACKET_SIZE = 131
+MIC_PACKET_SIZE = 132
 
 
 packetSize = [(EEG_HEADER, EEG_PACKET_SIZE), (MIC_HEADER, MIC_PACKET_SIZE)]
@@ -65,16 +65,18 @@ nCh: list[int] = [EEG_N_CHANNELS, 1]
 
 sigInfo: dict = {
     "eeg": {"fs": SAMPLE_RATE_EEG, "nCh": EEG_N_CHANNELS},
-    "mic": {"fs": SAMPLE_RATE_MIC, "nCh": 1}
+    "mic_eeg": {"fs": SAMPLE_RATE_MIC, "nCh": 1},
+    "counter_eeg": {"fs": SAMPLE_RATE_EEG / SAMPLES_PER_PACKET_EEG, "nCh": 1},
+    "counter_mic_eeg": {"fs": SAMPLE_RATE_MIC / SAMPLES_PER_PACKET_MIC, "nCh": 1},
 }
 """Dictionary containing the signals information."""
 
 
 def _decode_eeg(data: bytes) -> np.ndarray:
     """Decode EEG packet.
-    Packet structure (210 bytes total):
+    Packet structure (211 bytes total):
     - 1 byte: Header (0x55)
-    - 1 byte: Packet counter
+    - 2 byte: Packet counter
     - 4 bytes: Timestamp (microseconds, for cross-packet synchronization)
     - 200 bytes: 4 samples × 50 bytes per sample
       - 24 bytes: ADS1298_A data (8 channels × 3 bytes)
@@ -91,16 +93,17 @@ def _decode_eeg(data: bytes) -> np.ndarray:
     gain = 6.0
     nBit = 24
 
-    counter = bytearray(data[1:2])
+    counter = bytearray(data[1:3])
 
     # Cast the counter to np.int32
-    counter = np.asarray(struct.unpack(">B", counter), dtype=np.int32)
+    counter = np.asarray(struct.unpack("<H", counter), dtype=np.int32)
+    counter = counter.reshape(1, 1)
     
     dataADSATmp = bytearray(
-        data[6:30] + data[56:80] + data[106:130] + data[156:180]
+        data[7:31] + data[57:81] + data[107:131] + data[157:181]
     )
     dataADSBTmp = bytearray(
-       data[30:54] + data[80:104] + data[130:154] + data[180:204]
+       data[31:55] + data[81:105] + data[131:155] + data[181:205]
     )
 
     pos = 0
@@ -108,33 +111,36 @@ def _decode_eeg(data: bytes) -> np.ndarray:
         prefix = 255 if dataADSATmp[pos] > 127 else 0
         dataADSATmp.insert(pos, prefix)
         pos += 4
-    emgADSA = np.asarray(struct.unpack(f">{nSamp *nChSingleADS}i", dataADSATmp), dtype=np.int32)
-    emgADSA = emgADSA.reshape(nSamp, nChSingleADS)
+    eegADSA = np.asarray(struct.unpack(f">{nSamp *nChSingleADS}i", dataADSATmp), dtype=np.int32)
+    eegADSA = eegADSA.reshape(nSamp, nChSingleADS)
     pos = 0
     for _ in range(len(dataADSBTmp) // 3):
         prefix = 255 if dataADSBTmp[pos] > 127 else 0
         dataADSBTmp.insert(pos, prefix)
         pos += 4
-    emgADSB = np.asarray(struct.unpack(f">{nSamp *nChSingleADS}i", dataADSBTmp), dtype=np.int32)
-    emgADSB = emgADSB.reshape(nSamp, nChSingleADS)
-    emgAllChannels = np.concatenate((emgADSA, emgADSB), axis=1)  # (nSamp, 16)
+    eegADSB = np.asarray(struct.unpack(f">{nSamp *nChSingleADS}i", dataADSBTmp), dtype=np.int32)
+    eegADSB = eegADSB.reshape(nSamp, nChSingleADS)
+    eegAllChannels = np.concatenate((eegADSA, eegADSB), axis=1)  # (nSamp, 16)
 
-    counter = counter.reshape(1, 1)
-    emg = emgAllChannels * (vRef / (gain * (2 ** (nBit - 1) - 1)))
-    emg *= 10e6  # uV
-    emg = emg.astype(np.float32)
-    return emg
+    eeg = eegAllChannels * (vRef / (gain * (2 ** (nBit - 1) - 1)))
+    eeg *= 10e6  # uV
+    eeg = eeg.astype(np.float32)
+    return eeg, counter
 
 
 def _decode_mic(data: bytes) -> np.ndarray:
     """Decode microphone packet.
-    Packet structure (131 bytes total):
+    Packet structure (132 bytes total):
     - 1 byte header (0xAA)
-    - 1 byte counter
+    - 2 byte counter
     - 64 samples of 16-bit signed audio data (128 bytes)
     - 1 byte trailer (0x55)
     """
-    audio_data = data[2:2 + SAMPLES_PER_PACKET_MIC * 2]
+    counter = bytearray(data[1:3])
+    counter = np.asarray(struct.unpack("<H", counter), dtype=np.int32)
+    counter = counter.reshape(1, 1)
+
+    audio_data = data[3:3 + SAMPLES_PER_PACKET_MIC * 2] 
 
     # Unpack 16-bit signed samples (little-endian)
     audio = np.array(
@@ -148,7 +154,7 @@ def _decode_mic(data: bytes) -> np.ndarray:
     # Convert to float32 normalized to [-1.0, 1.0] range
     audio = audio.astype(np.float32) / 32768.0
 
-    return audio
+    return audio, counter
 
 
 def decodeFn(data: bytes) -> dict[str, np.ndarray]:
@@ -162,14 +168,14 @@ def decodeFn(data: bytes) -> dict[str, np.ndarray]:
     Parameters
     ----------
     data : bytes
-        A packet of either 131 bytes (MIC) or 210 bytes (EEG).
+        A packet of either 132 bytes (MIC) or 211 bytes (EEG).
 
     Returns
     -------
     dict[str, np.ndarray]
         Dictionary containing the decoded signals:
-        - For mic packets: {"eeg": empty, "mic": audio_data}
-        - For EEG packets: {"eeg": eeg_data, "mic": empty}
+        - For mic packets: {"eeg": empty, "mic_eeg": mic_data, "counter_eeg": None, "counter_mic_eeg": mic_counter}
+        - For EEG packets: {"eeg": eeg_data, "mic_eeg": empty, "counter_eeg": eeg_counter, "counter_mic_eeg": None}
     """
     packet_len = len(data)
     header = data[0]
@@ -178,14 +184,14 @@ def decodeFn(data: bytes) -> dict[str, np.ndarray]:
         trailer = data[-1]
         if trailer != MIC_TRAILER:
             raise ValueError(f"Invalid mic trailer: 0x{trailer:02X}, expected 0x{MIC_TRAILER:02X}")
-        audio = _decode_mic(data)
-        return {"mic": audio, "eeg": None}
+        audio, counter = _decode_mic(data)
+        return {"eeg": None, "counter_eeg": None, "mic_eeg": audio, "counter_mic_eeg": counter}
     elif packet_len == EEG_PACKET_SIZE and header == EEG_HEADER:
         # This is an EEG packet
         trailer = data[-1]
         if trailer != EEG_TRAILER:
             raise ValueError(f"Invalid EEG trailer: 0x{trailer:02X}, expected 0x{EEG_TRAILER:02X}")
-        eeg = _decode_eeg(data)
-        return {"eeg": eeg, "mic": None}
+        eeg, counter = _decode_eeg(data)
+        return {"eeg": eeg, "counter_eeg": counter, "mic_eeg": None, "counter_mic_eeg": None}
     else:
         raise ValueError(f"Invalid packet: size={packet_len}, header=0x{header:02X}")

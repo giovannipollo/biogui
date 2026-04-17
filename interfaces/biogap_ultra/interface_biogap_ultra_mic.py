@@ -28,21 +28,15 @@ SAMPLES_PER_PACKET = 64  # 16-bit samples per BLE packet
 # Packet format constants
 MIC_HEADER = 0xAA
 MIC_TRAILER = 0x55
-MIC_PACKET_SIZE = 131
+MIC_PACKET_SIZE = 132
 
 packetSize: int = [(MIC_HEADER, MIC_PACKET_SIZE)]
 """Number of bytes in each package."""
 
-startSeq: list[bytes] = [
-    0.5,
-    (26).to_bytes()  # START_MIC_STREAMING command
-]
+startSeq: list[bytes] = [0.5, (26).to_bytes()]  # START_MIC_STREAMING command
 """Sequence of commands to start microphone streaming."""
 
-stopSeq: list[bytes] = [
-    0.5,
-    (27).to_bytes()  # STOP_MIC_STREAMING command
-]
+stopSeq: list[bytes] = [0.5, (27).to_bytes()]  # STOP_MIC_STREAMING command
 """Sequence of commands to stop microphone streaming."""
 
 fs: list[float] = [SAMPLE_RATE]
@@ -51,7 +45,10 @@ fs: list[float] = [SAMPLE_RATE]
 nCh: list[int] = [1]
 """Sequence of integers representing the number of channels of each signal."""
 
-sigInfo: dict = {"mic": {"fs": SAMPLE_RATE, "nCh": 1}}
+sigInfo: dict = {
+    "mic": {"fs": SAMPLE_RATE, "nCh": 1},
+    "counter_mic": {"fs": SAMPLE_RATE / SAMPLES_PER_PACKET, "nCh": 1},
+}
 """Dictionary containing the signals information."""
 
 
@@ -62,45 +59,53 @@ def decodeFn(data: bytes) -> dict[str, np.ndarray]:
     Parameters
     ----------
     data : bytes
-        A packet of 131 bytes containing microphone data.
+        A packet of 132 bytes containing microphone data.
 
     Returns
     -------
     dict[str, np.ndarray]
-        Dictionary containing the audio samples with shape (nSamp, nCh).
-        
+        Dictionary containing the audio data and the packet counter:
+        {"mic": audio_data, "counter_mic": counter_value}
+
     Packet format:
     - 1 byte header (0xAA)
-    - 1 byte counter
+    - 2 byte counter
     - 64 samples of 16-bit signed audio data (128 bytes)
     - 1 byte trailer (0x55)
-    
+
     """
-    
+
     header = data[0]
     trailer = data[-1]
-    
+
     if header != MIC_HEADER:
         raise ValueError(f"Invalid header: 0x{header:02X}, expected 0x{MIC_HEADER:02X}")
-    
+
     if trailer != MIC_TRAILER:
-        raise ValueError(f"Invalid trailer: 0x{trailer:02X}, expected 0x{MIC_TRAILER:02X}")
-    
+        raise ValueError(
+            f"Invalid trailer: 0x{trailer:02X}, expected 0x{MIC_TRAILER:02X}"
+        )
+
     if len(data) != MIC_PACKET_SIZE:
-        raise ValueError(f"Invalid packet size: {len(data)}, expected {MIC_PACKET_SIZE}")
-    
-    audio_data = data[2:2 + SAMPLES_PER_PACKET * 2]
-    
+        raise ValueError(
+            f"Invalid packet size: {len(data)}, expected {MIC_PACKET_SIZE}"
+        )
+
+    counter = bytearray(data[1:3])
+    counter = np.asarray(struct.unpack("<H", counter), dtype=np.int32)
+    counter = counter.reshape(1, 1)
+
+    audio_data = data[3 : 3 + SAMPLES_PER_PACKET * 2]
+
     # Unpack 16-bit signed samples (little-endian)
     audio = np.array(
-        struct.unpack(f"<{SAMPLES_PER_PACKET}h", audio_data),
-        dtype=np.int16
+        struct.unpack(f"<{SAMPLES_PER_PACKET}h", audio_data), dtype=np.int16
     )
-    
+
     # Reshape to (nSamp, nCh) format
     audio = audio.reshape(-1, 1)
-    
+
     # Convert to float32 normalized to [-1.0, 1.0] range
     audio = audio.astype(np.float32) / 32768.0
-    
-    return {"mic": audio}
+
+    return {"mic": audio, "counter_mic": counter}
